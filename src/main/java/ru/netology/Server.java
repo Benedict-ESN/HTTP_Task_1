@@ -8,25 +8,27 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.LocalDateTime;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 public class Server {
     private final int port;
-    private final List<String> validPaths;
     private final ExecutorService threadPool;
     private volatile boolean isRunning = true;
     private ServerSocket serverSocket;
+
+    private final Map<String, Map<String, Handler>> handlers = new HashMap<>();
+
     public Server(int port) {
         this.port = port;
-        this.validPaths = List.of(
-                "/index.html", "/spring.svg", "/spring.png", "/resources.html", "/styles.css", "/app.js", "/links.html",
-                "/forms.html", "/classic.html", "/events.html", "/events.js"
-        );
         this.threadPool = Executors.newFixedThreadPool(64); // создаем пул на 64 потока
+    }
+
+    public void addHandler(String method, String path, Handler handler) {
+        handlers.computeIfAbsent(method, k -> new HashMap<>()).put(path, handler);
     }
 
     public void start() {
@@ -56,7 +58,6 @@ public class Server {
         }
     }
 
-
     private void handleConnection(Socket clientSocket) {
         try (
                 final var in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
@@ -72,31 +73,85 @@ public class Server {
                 return;
             }
 
-            final var path = parts[1]; // Получаем запрашиваемый путь
-            if (!validPaths.contains(path)) {
-                sendResponse(out, "404 Not Found", 0, "text/plain", null);
-                return;
+            final var method = parts[0];
+            final var uri = parts[1]; // Здесь содержится и путь, и Query String
+
+            // Читаем заголовки
+            String line;
+            Map<String, String> headers = new HashMap<>();
+            while (!(line = in.readLine()).isEmpty()) {
+                var headerParts = line.split(": ");
+                headers.put(headerParts[0], headerParts[1]);
             }
 
-            final var filePath = Path.of(".", "public", path);
-            final var mimeType = Files.probeContentType(filePath);
+            // Чтение тела запроса
+            StringBuilder body = new StringBuilder();
+            while (in.ready()) {
+                body.append((char) in.read());
+            }
 
-            // Специальная обработка для /classic.html
-            if (path.equals("/classic.html")) {
-                final var template = Files.readString(filePath);
-                final var content = template.replace("{time}", LocalDateTime.now().toString()).getBytes();
-                sendResponse(out, "200 OK", content.length, mimeType, content);
+            // Создаем объект Request с разбором Query String
+            Request request = new Request(method, uri, body.toString());
+
+            // Поиск хендлера по пути
+            Handler handler = findHandler(method, request.getPath());
+            if (handler != null) {
+                handler.handle(request, out);
             } else {
-                final var length = Files.size(filePath);
-                sendResponse(out, "200 OK", length, mimeType, Files.readAllBytes(filePath));
+                handleStaticFile(request.getPath(), out);
             }
-
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void sendResponse(BufferedOutputStream out, String status, long length, String mimeType, byte[] content) throws IOException {
+    private void handleStaticFile(String path, BufferedOutputStream out) throws IOException {
+        // Если путь пустой или "/", выведем список файлов в директории public
+        if (path.equals("/") || path.isEmpty()) {
+            var publicDir = Path.of(".", "public");
+            if (Files.exists(publicDir) && Files.isDirectory(publicDir)) {
+                StringBuilder content = new StringBuilder("<html><body><h1>Список файлов:</h1><ul>");
+                Files.list(publicDir).forEach(file -> {
+                    var fileName = file.getFileName().toString();
+                    content.append("<li><a href=\"")
+                            .append(fileName)
+                            .append("\">")
+                            .append(fileName)
+                            .append("</a></li>");
+                });
+                content.append("</ul></body></html>");
+
+                // Отправляем список файлов как HTML
+                byte[] contentBytes = content.toString().getBytes();
+                sendResponse(out, "200 OK", contentBytes.length, "text/html", contentBytes);
+            } else {
+                // Если директория public не найдена
+                sendResponse(out, "404 Not Found", 0, "text/plain", null);
+            }
+        } else {
+            // Обработка запроса на конкретный файл
+            final var filePath = Path.of(".", "public", path);
+            if (Files.exists(filePath)) {
+                final var mimeType = Files.probeContentType(filePath);
+                final var length = Files.size(filePath);
+                sendResponse(out, "200 OK", length, mimeType, Files.readAllBytes(filePath));
+            } else {
+                // Если файл не найден
+                sendResponse(out, "404 Not Found", 0, "text/plain", null);
+            }
+        }
+    }
+
+
+    private Handler findHandler(String method, String path) {
+        Map<String, Handler> methodHandlers = handlers.get(method);
+        if (methodHandlers != null) {
+            return methodHandlers.get(path);
+        }
+        return null;
+    }
+
+    public void sendResponse(BufferedOutputStream out, String status, long length, String mimeType, byte[] content) throws IOException {
         var response = "HTTP/1.1 " + status + "\r\n" +
                 "Content-Type: " + mimeType + "\r\n" +
                 "Content-Length: " + length + "\r\n" +
@@ -123,7 +178,7 @@ public class Server {
             e.printStackTrace();
         }
 
-        // Даем пулу потоков 5 секунд на завершение
+        // 5 секунд на завершение
         try {
             if (!threadPool.awaitTermination(5, TimeUnit.SECONDS)) {
                 System.out.println("Некоторые потоки не завершились, принудительная остановка...");
@@ -152,5 +207,4 @@ public class Server {
             e.printStackTrace();
         }
     }
-
 }
