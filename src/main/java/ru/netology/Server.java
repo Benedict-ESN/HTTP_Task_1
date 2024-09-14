@@ -74,9 +74,9 @@ public class Server {
             }
 
             final var method = parts[0];
-            final var path = parts[1];
+            final var uri = parts[1]; // Здесь содержится и путь, и Query String
 
-            // Заголовки запроса
+            // Читаем заголовки
             String line;
             Map<String, String> headers = new HashMap<>();
             while (!(line = in.readLine()).isEmpty()) {
@@ -90,17 +90,16 @@ public class Server {
                 body.append((char) in.read());
             }
 
-            Request request = new Request(method, path, body.toString());
+            // Создаем объект Request с разбором Query String
+            Request request = new Request(method, uri, body.toString());
 
-            // Поиск хендлера по методу и пути
-            Handler handler = findHandler(method, path);
+            // Поиск хендлера по пути
+            Handler handler = findHandler(method, request.getPath());
             if (handler != null) {
                 handler.handle(request, out);
             } else {
-//                sendResponse(out, "404 Not Found", 0, "text/plain", null);
-                handleStaticFile(path, out);
+                handleStaticFile(request.getPath(), out);
             }
-
         } catch (IOException e) {
             e.printStackTrace();
         }
